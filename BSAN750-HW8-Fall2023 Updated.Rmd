@@ -1,0 +1,235 @@
+---
+title: "Assignment 8 -- Predicting Term Deposit Subscription"
+author: "Names: Jui Nagarkar, Injuu Jyenis, Zeeshan Ijaz, Ayah Elnady"
+date: "Due by November 26, 2023"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# path<- "/Users/Shaobo Li/Dropbox/Teaching/KU/Data"
+# knitr::opts_knit$set(root.dir = path)
+library(tidyverse)
+library(glmnet)
+library(dplyr)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(ROCR)
+```
+
+**INTRODUCTION: **
+ This report will be examining the bank-full data from the bank marketing dataset. Throughout the report we will see various methods being used such as logistic modeling, variable selection to refine the model, classification, and CART. Our end goal is to predict whether the client will subscribe a term deposit.
+
+**DATA DESCRIPTION: **
+The data is related with direct marketing campaigns (phone calls) of a Portuguese banking institution. **The classification goal is to predict if the client will subscribe a term deposit (variable y).**
+
+**METHODS AND RESULTS: **
+First we will begin by understanding what the logistic model looks like and what we can understand from this.
+```{r}
+bank.data <- read.csv("C:/Users/injuu/Downloads/bank+marketing/bank/bank-full.csv", sep=";")
+bankstr <- str(bank.data)
+banknames <- names(bank.data)
+bank.data$y<- as.factor(bank.data$y)
+bank.glm1<- glm(y~age+job+marital+education+default+balance+housing+loan+contact+day+month+duration+campaign+pdays+previous+poutcome, family=binomial,  data=bank.data)
+banksum1 <- summary(bank.glm1)
+#fitted probability which is the green curve
+hist(bank.glm1$fitted.values)
+#linear predictor is the log of odds
+#these two have 1 to 1 relationship
+hist(bank.glm1$linear.predictors)
+AIC(bank.glm1)
+BIC(bank.glm1)
+#mean residual deviance
+bank.glm1$deviance/bank.glm1$df.residual #analogous to MSE in linear model
+#the type is the extra piece when doing the prediction
+pred.glm1<- predict(bank.glm1, newdata = bank.data, type="response")
+hist(pred.glm1)
+#the higher the area under the curve the better the model is
+#we want the left side of the curve to be higher
+#AUC should be as large as possible -> largest possible area is 1
+#0.5 is the minimum value for AUC
+library(ROCR)
+pred <- prediction(pred.glm1, bank.data$y)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))  # get the AUC
+```
+Based on the results we see that the mean residual deviance is 0.47737 and the histograms look a little skewed. After performing predict, we got an AUC of 0.90794 which is pretty good. The AIC and BIC for this model is 21648.27 and 22023.19 respectively. We will see if we can try to improve this further after doing variable selection via stepwise forward and backward methods.
+```{r}
+model.step.b<- step(bank.glm1,direction='backward', trace= FALSE)
+model.step.b<- step(bank.glm1,direction='both', trace= FALSE)
+```
+We first tried to perform the stepwise approach by creating a null model and full model however, we kept running into errors about the type of y. Therefore, after doing some further research and taking help from ChatGPT, we created the step model by inputting the bank.glm1 as the parameter. We tested this with the forward, backward, and both models. The backward and both models gave us the same equation y ~ job + marital + education + balance + housing + loan + contact + day + month + duration + campaign + previous + poutcome. However when we used the forward model we got all the 16 variables instead of 13. The AIC was lower for backward and both therefore, we decided to test this equation in the glm function again and find the mean residual deviance and AUC.
+```{r}
+bank.data$y<- as.factor(bank.data$y)
+bank.glm2<- glm(y ~ job+marital+education+balance+housing+loan+contact+day+month+duration+campaign+previous+poutcome, family=binomial,  data=bank.data)
+banksum2 <- summary(bank.glm2)
+#fitted probability which is the green curve
+hist(bank.glm2$fitted.values)
+#linear predictor is the log of odds
+#these two have 1 to 1 relationship
+hist(bank.glm2$linear.predictors)
+AIC(bank.glm2)
+BIC(bank.glm2)
+#mean residual deviance
+bank.glm2$deviance/bank.glm2$df.residual #analogous to MSE in linear model
+#the type is the extra piece when doing the prediction
+pred.glm2<- predict(bank.glm2, newdata = bank.data, type="response")
+hist(pred.glm2)
+#the higher the area under the curve the better the model is
+#we want the left side of the curve to be higher
+#AUC should be as large as possible -> largest possible area is 1
+#0.5 is the minimum value for AUC
+library(ROCR)
+pred <- prediction(pred.glm2, bank.data$y)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred, "auc"), "y.values"))  # get the AUC
+```
+After performing the tests with the new equation, we got the mean residual deviance to be 0.47735 and AUC of 0.90793. The mean residual deviance is slightly lower and the AUC is slightly lower. The AIC and BIC in this case are 21642.4 and 21991.16 respectively. Therefore, we see that the AIC is lower in this case but BIC is larger. I think based off of the AIC results we can use this refined model. More variables are significant in this case so we believe this is a better model.
+
+3.
+```{r}
+# Predict probabilities using the refined model
+pred.glm2.train <- predict(bank.glm2, newdata = bank.data, type="response")
+
+# Define your asymmetric costs
+w.FP <- 1  # Cost for false positive
+w.FN <- 5  # Cost for false negative
+
+# Prepare a sequence of cutoff values
+p.seq <- seq(0.01, 1, by = 0.01)
+
+# Initialize a vector to store the costs
+cost <- numeric(length(p.seq))
+```
+
+For the asymmetric cost analysis, we considered the scenario where the cost of a false negative is substantially higher than a false positive. Specifically, we assigned a cost of $1 to each false positive and a cost of $5 to each false negative. This reflects situations where the cost of missing a positive case is more detrimental than incorrectly identifying a negative case as positive.
+
+Using these weights, we calculated the total cost across a range of cutoff probabilities — the thresholds at which a predicted probability is considered a 'subscription' versus 'no subscription'. The goal was to find the optimal cutoff that minimizes this total cost.
+
+```{r}
+# Loop through cutoff values to calculate the cost
+for(i in seq_along(p.seq)){
+  pcut <- p.seq[i]
+  pred.class <- ifelse(pred.glm2.train > pcut, 1, 0)
+  obs <- bank.data$y
+  # Calculate the cost
+  cost[i] <- sum((obs == "no" & pred.class == 1) * w.FP +
+                 (obs == "yes" & pred.class == 0) * w.FN)
+}
+
+# Find the cutoff value that minimizes the cost
+optimal.index <- which.min(cost)
+optimal.pcut <- p.seq[optimal.index]
+optimal.cost <- cost[optimal.index]
+
+# Print the optimal cutoff value and its associated cost
+print(optimal.pcut)
+print(optimal.cost)
+```
+
+
+Our analysis yielded an optimal cutoff probability of 0.12. This means that when the model predicts a subscription probability of 12% or higher, we classify the customer as a potential subscriber. At this threshold, the total cost of misclassifications was $10,797. This cutoff was selected over a simpler model with equal weighting for errors (symmetric cost), as it more accurately reflects the differing consequences of misclassification types in the context of our business objectives.
+
+To put this into perspective, at this cutoff, we are prioritizing the reduction of false negatives at the expense of accepting more false positives. Given the asymmetry in costs, this trade-off results in a lower overall cost to the organization, aligning with our strategic goal of maximizing subscription rates while managing resource allocation efficiently.
+
+4. Applying CART
+```{r}
+set.seed(2023)
+index <- sample(nrow(bank.data), nrow(bank.data) * 0.80)
+bank.train <- bank.data[index, ]
+bank.test <- bank.data[-index, ]
+
+# Fitting a classification tree
+bank.rpart <- rpart(formula = y ~ ., data = bank.train, method = "class")
+prp(bank.rpart, extra = 1)
+
+# Predicting and obtaining the confusion matrix
+pred<- predict(bank.rpart, newdata = bank.test, type="class")
+confusion_matrix <- table(bank.test$y, pred, dnn = c("True", "Pred"))
+
+# Calculating FPR and FNR for the test sample
+FPR_tree <- sum(pred == "yes" & bank.test$y == "no") / sum(bank.test$y == "no")
+FNR_tree <- sum(pred == "no" & bank.test$y == "yes") / sum(bank.test$y == "yes")
+
+# Computing the cost for the model
+cost_tree <- sum(pred == "yes" & bank.test$y == "no") * 1 + sum(pred == "no" & bank.test$y == "yes") * 5
+
+# Predicted probabilities with type="prob"
+pred_prob <- predict(bank.rpart, newdata = bank.test, type="prob")
+
+# ROC Curve for Classification Tree
+pred <- prediction(pred_prob[, "yes"], bank.test$y) 
+perf <- performance(pred, "tpr", "fpr")
+plot(perf)
+AUC_value <- unlist(slot(performance(pred, "auc"), "y.values"))
+
+```
+The decision tree has identified duration of the last contact as a highly predictive feature for determining whether a client will subscribe to a term deposit, with poutcome also playing a significant role. The splits suggest that clients with a shorter duration are less likely to subscribe, while those with certain outcomes from previous marketing campaigns or longer call durations are more likely to subscribe.
+
+From the complexity plot, we can see that the cross-validated error stabilizes after a certain point, indicating that a smaller tree might suffice to make accurate predictions without unnecessarily increasing model complexity.
+
+Given the CP values, it seems the tree can be pruned without significantly increasing the error rate. The ideal CP for pruning would be chosen based on the balance between tree size (simplicity) and prediction accuracy.
+
+Overall, the results suggest that focusing on clients with certain characteristics in terms of duration and poutcome could potentially increase the subscription rate for term deposits. However, caution should be taken to avoid overfitting, and the model should be validated on a separate test set to ensure its generalizability.
+
+
+5. Finetuning CART model
+
+We will prune the tree based on the CP value that minimizes the cross-validated error and also provides the option to adjust other tree parameters for further fine-tuning. It will then calculate the FPR and FNR for both the pruned and tuned models.
+```{r}
+plotcp(bank.rpart)
+printcp(bank.rpart)
+
+# Selecting the optimal CP value
+cp.table <- bank.rpart$cptable
+cp.min <- cp.table[which.min(cp.table[, "xerror"]), "CP"]
+cp.1se <- cp.table[which.min(cp.table[, "xerror"] + cp.table[, "xstd"]), "CP"]
+
+# Pruning
+pruned_tree <- prune(bank.rpart, cp = cp.1se)
+prp(pruned_tree, extra = 1) # Visualize the pruned tree
+
+# Evaluating the performance of the pruned tree
+pred.prune <- predict(pruned_tree, newdata = bank.test, type = "class")
+confusionMatrix.prune <- table(bank.test$y, pred.prune)
+
+FPR.prune <- confusionMatrix.prune[1,2] / sum(confusionMatrix.prune[1,])
+FNR.prune <- confusionMatrix.prune[2,1] / sum(confusionMatrix.prune[2,])
+print(paste("FPR (Pruned):", FPR.prune))
+print(paste("FNR (Pruned):", FNR.prune))
+
+# Fine-tuning the tree with adjusted parameters
+tuned_tree <- rpart(y ~ ., data = bank.train, method = "class", control = rpart.control(minsplit = 20, minbucket = 10))
+prp(tuned_tree, extra = 1)
+
+# Evaluating the performance of the tuned tree
+pred.tuned <- predict(tuned_tree, newdata = bank.test, type = "class")
+confusionMatrix.tuned <- table(bank.test$y, pred.tuned)
+
+FPR.tuned <- confusionMatrix.tuned[1,2] / sum(confusionMatrix.tuned[1,])
+FNR.tuned <- confusionMatrix.tuned[2,1] / sum(confusionMatrix.tuned[2,])
+print(paste("FPR (Tuned):", FPR.tuned))
+print(paste("FNR (Tuned):", FNR.tuned))
+
+```
+The fine-tuning of the decision tree has led to a simpler and more effective model. The main factors that predict whether someone will subscribe to a term deposit are the duration of the last call and the outcome of previous contacts. This makes sense because a longer call might mean the customer is interested, and if they responded well before, they might again.
+
+The tree shows that it's good at not wrongly saying someone will subscribe when they won't, which is great if that mistake is costly. However, it's not as good at catching all the people who might subscribe. Depending on the situation, this might be okay, especially if it's more important to be sure about the few you do catch.
+
+In short, the pruned tree, which is the result of fine-tuning, should do a better job at predicting new cases because it's not overly complicated. But it's important to test this tree with new data to make sure it works as expected before relying on it for important decisions.
+
+**CONCLUSION: **
+
+
+
+
+
+
+
+
+
+
+
